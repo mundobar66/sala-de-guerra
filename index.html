@@ -405,10 +405,10 @@ body { background:var(--paper); color:var(--ink); font-family:'IBM Plex Mono',mo
     </div>
     <div class="modal-body">
       <div class="upload-drop" id="drop-zone">
-        <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.doc,.docx" onchange="handleFile(this.files[0])">
+        <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.doc,.docx" multiple onchange="handleFiles(this.files)">
         <div class="upload-drop-icon">📎</div>
         <h3>Arrastra o selecciona</h3>
-        <p>PDF · Imagen · Word · Texto — La IA lo clasifica</p>
+        <p>PDF · Imagen · Word · Texto — Selecciona varios a la vez</p>
       </div>
       <div class="analysis-spinner" id="analysis-spinner">
         <div class="spinner-ring"></div>
@@ -1067,70 +1067,135 @@ function _openUploadModal() {
   openModal('modal-upload');
 }
 
+// ── BATCH PROCESSING ──
+let batchQueue = [];
+let batchResults = [];
+
+async function handleFiles(files) {
+  if(!files||!files.length) return;
+  batchQueue = Array.from(files);
+  batchResults = [];
+  document.getElementById('drop-zone').style.display='none';
+  document.getElementById('analysis-spinner').style.display='block';
+  document.getElementById('analysis-result').style.display='none';
+  document.getElementById('btn-confirm-upload').style.display='none';
+  if (batchQueue.length === 1) {
+    await handleFile(batchQueue[0]);
+  } else {
+    await processBatch();
+  }
+}
+
+async function processBatch() {
+  const total = batchQueue.length;
+  const setMsg = m => document.getElementById('spin-msg').textContent = m;
+  document.getElementById('analysis-spinner').style.display='block';
+
+  for (let i = 0; i < batchQueue.length; i++) {
+    const file = batchQueue[i];
+    setMsg('Analizando ' + (i+1) + ' de ' + total + ': ' + file.name);
+    try {
+      const b64 = await toBase64(file);
+      const isImage = file.type.startsWith('image/');
+      const isPDF = file.type === 'application/pdf';
+      const orgList = ORGANISMOS.map(o => '- ' + o.id + ': ' + o.name).join('\n');
+      const expList = state.expedientes.map(e => '- ID ' + e.id + ': ' + e.asunto).join('\n');
+      const systemPrompt = 'Eres asistente juridico-administrativo. Devuelve SOLO JSON sin backticks.\nOrganismos: ' + orgList + '\nExpedientes: ' + (expList||'(ninguno)') + '\nFormato: {"tipo":"string","nombre":"string","fecha":"YYYY-MM-DD o null","resumen":"string","etiquetas":[],"organismoId":"string","esperaRespuesta":true,"expedientesAfectados":[],"siguientePaso":"string","urgencia":"alta"}';
+      let userContent;
+      if(isImage) userContent=[{type:'image',source:{type:'base64',media_type:file.type,data:b64}},{type:'text',text:'Analiza.'}];
+      else if(isPDF) userContent=[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Analiza.'}];
+      else { const text=await file.text(); userContent='Analiza:\n\n'+text.slice(0,3000); }
+      const res = await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:500,system:systemPrompt,messages:[{role:'user',content:userContent}]})});
+      const data = await res.json();
+      const raw = data.content?.find(b=>b.type==='text')?.text||'{}';
+      const analysis = JSON.parse(raw.replace(/```json|```/g,'').trim());
+      batchResults.push({analysis, fileName:file.name, fileType:file.type});
+    } catch(e) {
+      batchResults.push({analysis:{nombre:file.name,tipo:'Otro',resumen:'Error al analizar',etiquetas:[],expedientesAfectados:[],organismoId:'otro',esperaRespuesta:false}, fileName:file.name, fileType:file.type, error:true});
+    }
+    if (i < batchQueue.length-1) await new Promise(r=>setTimeout(r,800));
+  }
+  renderBatchResults();
+}
+
+function renderBatchResults() {
+  document.getElementById('analysis-spinner').style.display='none';
+  const ar = document.getElementById('analysis-result');
+  ar.style.display='block';
+  const expOptions = state.expedientes.map(e=>'<option value="'+e.id+'">EXP-'+String(e.id).padStart(3,'0')+' · '+e.asunto+'</option>').join('');
+  ar.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;"><span style="font-size:12px;font-weight:700;">'+batchResults.length+' documentos analizados</span><label style="display:flex;align-items:center;gap:6px;font-size:11px;cursor:pointer;"><input type="checkbox" id="batch-apply-nextstep" checked> Actualizar siguiente paso</label></div><div style="margin-bottom:12px;"><div class="form-label">Vincular todos a este expediente</div><select class="form-select" id="batch-global-exp" style="margin-top:4px;"><option value="">— Solo los que sugiere la IA —</option>'+expOptions+'</select></div><div style="display:flex;flex-direction:column;gap:8px;max-height:300px;overflow-y:auto;">'+batchResults.map(function(r){var org=getOrg(r.analysis.organismoId||'otro');return '<div style="background:var(--paper2);border-radius:6px;padding:10px;border:1px solid var(--border);"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;"><span style="font-size:11px;font-weight:600;">'+( r.analysis.nombre||r.fileName)+'</span><span style="font-size:9px;padding:2px 8px;border-radius:10px;background:'+org.bg+';color:'+org.color+';">'+org.icon+' '+org.name+'</span></div><div style="font-size:10px;color:var(--muted);">'+(r.analysis.tipo||'Otro')+' · '+(r.analysis.fecha||'Sin fecha')+'</div>'+(r.error?'<div style="color:var(--red);font-size:10px;">Error al analizar</div>':'')+'</div>';}).join('')+'</div>';
+  document.getElementById('btn-confirm-upload').style.display='inline-block';
+  document.getElementById('btn-confirm-upload').textContent = 'Guardar ' + batchResults.length + ' documentos';
+  document.getElementById('btn-confirm-upload').onclick = confirmBatchUpload;
+}
+
+async function confirmBatchUpload() {
+  const globalExpIdRaw = document.getElementById('batch-global-exp')?.value;
+  const globalExpId = globalExpIdRaw ? parseInt(globalExpIdRaw) : null;
+  const applyNext = document.getElementById('batch-apply-nextstep')?.checked;
+  const btn = document.getElementById('btn-confirm-upload');
+  btn.disabled = true;
+  let saved = 0;
+  for (const r of batchResults) {
+    const analysis = r.analysis;
+    const org = getOrg(analysis.organismoId||'otro');
+    const fecha = analysis.fecha || today();
+    const fechaLimite = analysis.esperaRespuesta ? addDays(fecha, org.dias) : null;
+    let expedientes = [...(analysis.expedientesAfectados||[])];
+    if (globalExpId && !expedientes.includes(globalExpId)) expedientes.push(globalExpId);
+    if (!expedientes.length && preselectedExpId) expedientes.push(preselectedExpId);
+    const doc = {nombre:analysis.nombre||r.fileName,tipo:analysis.tipo||'Otro',fecha,resumen:analysis.resumen||'',etiquetas:analysis.etiquetas||[],organismoId:analysis.organismoId||'otro',fechaLimite,expedientes};
+    try {
+      const newId = await saveDocToDB(doc);
+      doc.id = newId;
+      state.documentos.push(doc);
+      if (applyNext && analysis.siguientePaso) {
+        for (const id of expedientes) { const e=getExp(id); if(e){e.siguientePaso=analysis.siguientePaso;try{await saveExpToDB(e);}catch(_){}} }
+      }
+      saved++;
+      btn.textContent = 'Guardando... ' + saved + '/' + batchResults.length;
+    } catch(e) { console.error(e); }
+    await new Promise(r=>setTimeout(r,200));
+  }
+  closeModal('modal-upload');
+  showToast(saved + ' documentos guardados');
+  renderNav();
+  if (preselectedExpId) showExp(preselectedExpId); else showDashboard();
+}
+
 async function handleFile(file) {
   if(!file)return;
   document.getElementById('drop-zone').style.display='none';
   document.getElementById('analysis-spinner').style.display='block';
   document.getElementById('analysis-result').style.display='none';
   document.getElementById('btn-confirm-upload').style.display='none';
-
   const setMsg=m=>document.getElementById('spin-msg').textContent=m;
-
   try {
     setMsg('Leyendo archivo...');
     const b64=await toBase64(file);
     const isImage=file.type.startsWith('image/');
     const isPDF=file.type==='application/pdf';
     setMsg('Analizando con IA...');
-
-    const orgList = ORGANISMOS.map(o=>`- ${o.id}: ${o.name} (${o.dias} días)`).join('\n');
-    const expList = state.expedientes.map(e=>`- ID ${e.id}: ${e.asunto}`).join('\n');
-
-    const systemPrompt = `Eres un asistente jurídico-administrativo para auditoría municipal española.
-Analiza documentos y devuelve SOLO JSON válido sin backticks ni texto extra.
-
-Organismos disponibles y sus plazos:
-${orgList}
-
-Expedientes abiertos:
-${expList||'(ninguno)'}
-
-Formato:
-{
-  "tipo": "Reclamación"|"Notificación"|"Resolución"|"Certificación"|"Evidencia"|"Acta"|"Recurso"|"Solicitud"|"Silencio administrativo"|"Denuncia"|"Otro",
-  "nombre": "Nombre descriptivo corto",
-  "fecha": "YYYY-MM-DD o null",
-  "resumen": "2-3 frases: qué es, qué dice, qué implica",
-  "etiquetas": ["tag1","tag2"],
-  "organismoId": "id del organismo origen o destino detectado",
-  "esperaRespuesta": true|false,
-  "expedientesAfectados": [lista de IDs numéricos],
-  "siguientePaso": "Acción jurídica concreta y específica",
-  "urgencia": "alta"|"media"|"baja"
-}`;
-
+    const orgList = ORGANISMOS.map(o=>'- '+o.id+': '+o.name+' ('+o.dias+' dias)').join('\n');
+    const expList = state.expedientes.map(e=>'- ID '+e.id+': '+e.asunto).join('\n');
+    const systemPrompt = 'Eres un asistente juridico-administrativo para auditoria municipal espanola. Analiza documentos y devuelve SOLO JSON valido sin backticks ni texto extra.\nOrganismos disponibles y sus plazos:\n'+orgList+'\nExpedientes abiertos:\n'+(expList||'(ninguno)')+'\nFormato: {"tipo":"Reclamacion","nombre":"string","fecha":"YYYY-MM-DD o null","resumen":"string","etiquetas":[],"organismoId":"string","esperaRespuesta":true,"expedientesAfectados":[],"siguientePaso":"string","urgencia":"alta"}';
     let userContent;
     if(isImage) userContent=[{type:'image',source:{type:'base64',media_type:file.type,data:b64}},{type:'text',text:'Analiza este documento administrativo.'}];
     else if(isPDF) userContent=[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Analiza este documento administrativo.'}];
-    else { const text=await file.text(); userContent=`Analiza:\n\n${text.slice(0,5000)}`; }
-
-    const res=await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,system:systemPrompt,messages:[{role:'user',content:userContent}]})
-    });
+    else { const text=await file.text(); userContent='Analiza:\n\n'+text.slice(0,5000); }
+    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,system:systemPrompt,messages:[{role:'user',content:userContent}]})});
     const data=await res.json();
     const raw=data.content?.find(b=>b.type==='text')?.text||'{}';
     const analysis=JSON.parse(raw.replace(/```json|```/g,'').trim());
-
     pendingDoc={analysis,fileName:file.name,fileType:file.type,b64};
     renderUploadResult(analysis);
-
   } catch(err) {
     document.getElementById('analysis-spinner').style.display='none';
     document.getElementById('drop-zone').style.display='block';
     showToast('Error: '+err.message);
   }
 }
+
 
 function renderUploadResult(a) {
   document.getElementById('analysis-spinner').style.display='none';
@@ -1213,7 +1278,7 @@ document.querySelectorAll('.overlay').forEach(o=>o.addEventListener('click',e=>{
 const dz=document.getElementById('drop-zone');
 dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag');});
 dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));
-dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');handleFile(e.dataTransfer.files[0]);});
+dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');handleFiles(e.dataTransfer.files);});
 
 function toBase64(file){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=()=>rej(new Error('Error'));r.readAsDataURL(file);});}
 
