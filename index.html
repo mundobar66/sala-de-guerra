@@ -519,29 +519,33 @@ async function loadState() {
       sbFetch('/rest/v1/expedientes?select=*&order=id.asc'),
       sbFetch('/rest/v1/documentos?select=*&order=id.asc')
     ]);
-    state.expedientes = exps.map(e => ({
-      id: e.id, asunto: e.asunto, estado: e.estado,
-      fecha: e.fecha, siguientePaso: e.siguiente_paso,
-      notas: e.notas, createdAt: e.created_at
+    state.expedientes = (Array.isArray(exps)?exps:[]).map(e => ({
+      id: e.id, asunto: e.asunto, estado: e.estado||'activo',
+      fecha: e.fecha, siguientePaso: e.siguiente_paso||'',
+      notas: e.notas||'', createdAt: e.created_at
     }));
-    state.documentos = docs.map(d => ({
-      id: d.id, nombre: d.nombre, tipo: d.tipo, fecha: d.fecha,
-      resumen: d.resumen, etiquetas: d.etiquetas||[],
-      organismoId: d.organismo_id, fechaLimite: d.fecha_limite,
+    state.documentos = (Array.isArray(docs)?docs:[]).map(d => ({
+      id: d.id, nombre: d.nombre, tipo: d.tipo||'Otro', fecha: d.fecha,
+      resumen: d.resumen||'', etiquetas: d.etiquetas||[],
+      organismoId: d.organismo_id||'otro', fechaLimite: d.fecha_limite,
       expedientes: d.expedientes||[], addedAt: d.added_at
     }));
     dbReady = true;
+    console.log('Cargado:', state.expedientes.length, 'expedientes,', state.documentos.length, 'documentos');
   } catch(e) { console.error('Error cargando datos:', e); showToast('Error conectando con la base de datos'); }
 }
 
 // ── SAVE FUNCTIONS ──
 async function saveExpToDB(exp) {
-  const body = { asunto: exp.asunto, estado: exp.estado, fecha: exp.fecha, siguiente_paso: exp.siguientePaso||null, notas: exp.notas||null };
-  if (exp.id && !exp._new) {
-    await sbFetch('/rest/v1/expedientes?id=eq.' + exp.id, 'PATCH', body);
-  } else {
+  const body = { asunto: exp.asunto, estado: exp.estado||'activo', fecha: exp.fecha||null, siguiente_paso: exp.siguientePaso||null, notas: exp.notas||null };
+  if (exp._new || !exp.id) {
+    // INSERT new expediente
     const res = await sbFetch('/rest/v1/expedientes', 'POST', body);
-    return res[0]?.id || res?.id;
+    const arr = Array.isArray(res) ? res : [res];
+    return arr[0]?.id;
+  } else {
+    // UPDATE existing
+    await sbFetch('/rest/v1/expedientes?id=eq.' + exp.id, 'PATCH', body);
   }
 }
 
@@ -756,9 +760,9 @@ function showDashboard() {
       </div>` : (!state.expedientes.length ? `
       <div class="empty-state">
         <div class="empty-icon">⚖️</div>
-        <h3>Sala de guerra lista</h3>
-        <p>Empieza creando tu primer expediente. Luego añade los documentos y la IA los clasificará automáticamente.</p>
-        <button class="btn-primary" style="width:auto;display:inline-block;padding:10px 24px;" onclick="openNewExp()">+ Crear primer expediente</button>
+        <h3>${state.documentos.length > 0 ? 'Documentos cargados' : 'Sala de guerra lista'}</h3>
+        <p>${state.documentos.length > 0 ? state.documentos.length + ' documentos guardados. Sube más para que la IA cree los expedientes automáticamente.' : 'Sube documentos y la IA creará los expedientes automáticamente.'}</p>
+        <button class="btn-primary" style="width:auto;display:inline-block;padding:10px 24px;" onclick="openUpload()">↑ Subir documentos</button>
       </div>` : '')}
     </div>`;
 }
