@@ -1360,6 +1360,15 @@ async function reanalyzeDocs() {
   
   let createdCount = 0;
   let processed = 0;
+  let errors = 0;
+  // Panel de log visible
+  const logDiv = document.createElement('div');
+  logDiv.id = 'reanalysis-log';
+  logDiv.style = 'position:fixed;bottom:60px;right:20px;background:#1a1410;color:#c9a96e;font-family:monospace;font-size:11px;padding:12px;border-radius:6px;max-width:420px;max-height:200px;overflow-y:auto;z-index:9999;';
+  logDiv.innerHTML = '📋 Log de re-análisis<br>';
+  document.body.appendChild(logDiv);
+  function addLog(msg) { logDiv.innerHTML += msg + '<br>'; logDiv.scrollTop = logDiv.scrollHeight; }
+
   for (const doc of docs) {
     const orgList = ORGANISMOS.map(o => '- ' + o.id + ': ' + o.name).join('\n');
     const expList = state.expedientes.map(e => '- ID ' + e.id + ': ' + e.asunto).join('\n');
@@ -1372,9 +1381,9 @@ async function reanalyzeDocs() {
         body: JSON.stringify({model:'claude-sonnet-4-20250514', max_tokens:500, system:systemPrompt, messages:[{role:'user',content:'Nombre del archivo: ' + doc.nombre}]})
       });
       const data = await res.json();
-      if(data.error) continue;
+      if(data.error) { addLog('❌ IA error doc '+processed+': '+JSON.stringify(data.error).slice(0,60)); errors++; continue; }
       const tb = (data.content||[]).find(b=>b.type==='text');
-      if(!tb) continue;
+      if(!tb) { addLog('❌ Sin respuesta texto doc '+processed); errors++; continue; }
       const raw = tb.text||'{}';
       const clean = raw.replace(/```json|```/g,'').trim();
       const js = clean.indexOf('{'); const je = clean.lastIndexOf('}');
@@ -1403,18 +1412,23 @@ async function reanalyzeDocs() {
       const existingExp = state.expedientes.find(e => e.asunto.toLowerCase() === expName.toLowerCase());
       if (existingExp) {
         if (!expIds.includes(existingExp.id)) expIds.push(existingExp.id);
+        addLog('🔗 Vinculado a exp existente: '+expName.slice(0,40));
       } else if (expIds.length === 0) {
         // Create new expediente
         try {
+          addLog('➕ Creando exp: '+expName.slice(0,40));
           const newExpData = {asunto: expName, estado:'activo', fecha: doc.fecha||today(), siguientePaso: analysis.siguientePaso||'', notas:'', createdAt: today()};
           const newExpId = await saveExpToDB({...newExpData, _new:true});
+          addLog(newExpId ? '✅ Creado ID='+newExpId : '❌ saveExpToDB devolvió: '+JSON.stringify(newExpId));
           if (newExpId) {
             newExpData.id = newExpId;
             state.expedientes.push(newExpData);
             expIds.push(newExpId);
             createdCount++;
           }
-        } catch(createErr) { console.error('Error creando exp:', createErr); }
+        } catch(createErr) { addLog('💥 Error creando exp: '+createErr.message); console.error('Error creando exp:', createErr); }
+      } else {
+        addLog('⚠️ expIds ya tiene IDs válidos (no crea nuevo): '+JSON.stringify(expIds));
       }
       if(expIds.length) {
         doc.expedientes = [...new Set([...(doc.expedientes||[]), ...expIds])];
@@ -1433,7 +1447,10 @@ async function reanalyzeDocs() {
   
   renderNav();
   showDashboard();
+  addLog('--- FIN: '+createdCount+' creados, '+errors+' errores IA ---');
   showToast('✅ Re-análisis completado — ' + createdCount + ' expedientes nuevos creados');
+  // El log queda visible 30 segundos
+  setTimeout(() => { const l = document.getElementById('reanalysis-log'); if(l) l.remove(); }, 30000);
 }
 
 async function testDB() {
