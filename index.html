@@ -537,11 +537,16 @@ async function loadState() {
 }
 
 // ── SAVE FUNCTIONS ──
+let _firstExpSave = true;
 async function saveExpToDB(exp) {
   const body = { asunto: exp.asunto, estado: exp.estado||'activo', fecha: exp.fecha||null, siguiente_paso: exp.siguientePaso||null, notas: exp.notas||null };
   if (exp._new || !exp.id) {
     // INSERT new expediente
     const res = await sbFetch('/rest/v1/expedientes', 'POST', body);
+    if (_firstExpSave) {
+      _firstExpSave = false;
+      alert('DEBUG saveExpToDB POST result: ' + JSON.stringify(res));
+    }
     const arr = Array.isArray(res) ? res : [res];
     return arr[0]?.id;
   } else {
