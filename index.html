@@ -794,6 +794,7 @@ function showExp(id) {
           <button class="btn-sm-action" onclick="openEditExp(${exp.id})">Editar</button>
           <button class="btn-sm-action" onclick="openPasoModal(${exp.id})">+ Paso</button>
           <button class="btn-sm-action" onclick="openUploadForExp(${exp.id})">+ Doc IA</button>
+          <button class="btn-sm-action" style="background:#1a3a5c;color:#fff;border-color:#1a3a5c" onclick="analizarExpediente(${exp.id})">🤖 Analizar</button>
           <button class="btn-sm-action danger" onclick="deleteExp(${exp.id})">Eliminar</button>
         </div>
       </div>
@@ -1429,7 +1430,84 @@ Responde SOLO con el nombre del expediente, sin explicaciones, sin comillas, sin
   showToast('✅ Análisis completado — ' + createdCount + ' expedientes nuevos, ' + state.expedientes.length + ' en total');
 }
 
-async function testDB() {
+async function analizarExpediente(id) {
+  const exp = getExp(id);
+  if (!exp) return;
+  const docs = state.documentos.filter(d => (d.expedientes||[]).includes(id));
+
+  showToast('🤖 Analizando expediente con IA...');
+
+  const listaDocumentos = docs.map(d => '- ' + d.nombre + (d.resumen ? ' (' + d.resumen + ')' : '')).join('\n');
+
+  const prompt = `Eres un asesor jurídico-administrativo experto en derecho administrativo español.
+
+Analiza este expediente de auditoría ciudadana contra el Ayuntamiento de Guadarrama:
+
+EXPEDIENTE: ${exp.asunto}
+DOCUMENTOS (${docs.length}):
+${listaDocumentos}
+
+Responde en este formato exacto:
+
+SITUACIÓN: [resumen de 2-3 líneas de la situación actual]
+
+SIGUIENTE PASO: [acción concreta e inmediata que debe hacer el ciudadano]
+
+PLAZO: [plazo legal aplicable o "Sin plazo inmediato"]
+
+ALERTA: [riesgo o advertencia importante, o "Sin alertas"]
+
+ESTRATEGIA: [recomendación estratégica en 1-2 líneas]`;
+
+  try {
+    const res = await fetch('https://anthropic-proxy.mundobar66.workers.dev', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 400,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    const data = await res.json();
+    if (data.error) { showToast('Error IA: ' + data.error.message); return; }
+
+    const texto = data.content?.[0]?.text || '';
+
+    // Extraer secciones
+    const get = (label) => {
+      const m = texto.match(new RegExp(label + ':\\s*([^\\n]+(?:\\n(?![A-Z]+:)[^\\n]+)*)'));
+      return m ? m[1].trim() : '';
+    };
+
+    const situacion = get('SITUACIÓN');
+    const siguientePaso = get('SIGUIENTE PASO');
+    const plazo = get('PLAZO');
+    const alerta = get('ALERTA');
+    const estrategia = get('ESTRATEGIA');
+
+    // Guardar siguiente paso en BD
+    if (siguientePaso) {
+      await sbFetch('/rest/v1/expedientes?id=eq.' + id, 'PATCH', { siguiente_paso: siguientePaso });
+      exp.siguientePaso = siguientePaso;
+    }
+
+    // Guardar estrategia en notas si no hay notas
+    if (estrategia && !exp.notas) {
+      const notaCompleta = '🤖 Análisis IA:\n\nSituación: ' + situacion + '\n\nPlazo: ' + plazo + '\n\nAlerta: ' + alerta + '\n\nEstrategia: ' + estrategia;
+      await sbFetch('/rest/v1/expedientes?id=eq.' + id, 'PATCH', { notas: notaCompleta });
+      exp.notas = notaCompleta;
+    }
+
+    showExp(id);
+    showToast('✅ Análisis completado');
+
+  } catch(e) {
+    showToast('Error al analizar: ' + e.message);
+  }
+}
+
+
   try {
     showToast('Probando conexión...');
     const res = await sbFetch('/rest/v1/expedientes', 'POST', {
