@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sala de Guerra · Auditoría Guadarrama</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;0,9..144,700;1,9..144,300&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -763,6 +764,7 @@ function showDashboard() {
         <h3>${state.documentos.length > 0 ? 'Documentos cargados' : 'Sala de guerra lista'}</h3>
         <p>${state.documentos.length > 0 ? state.documentos.length + ' documentos guardados. Sube más para que la IA cree los expedientes automáticamente.' : 'Sube documentos y la IA creará los expedientes automáticamente.'}</p>
         <button class="btn-primary" style="width:auto;display:inline-block;padding:10px 24px;" onclick="openUpload()">↑ Subir documentos</button>
+        <button class="btn-ghost" style="width:auto;display:inline-block;padding:10px 24px;margin-top:8px;" onclick="reanalyzeDocs()">🔄 Re-analizar y crear expedientes</button>
       </div>` : '')}
     </div>`;
 }
@@ -1100,16 +1102,27 @@ async function processBatch() {
     const file = batchQueue[i];
     setMsg('Analizando ' + (i+1) + ' de ' + total + ': ' + file.name);
     try {
-      const b64 = await toBase64(file);
       const isImage = file.type.startsWith('image/');
       const isPDF = file.type === 'application/pdf';
       const orgList = ORGANISMOS.map(o => '- ' + o.id + ': ' + o.name).join('\n');
       const expList = state.expedientes.map(e => '- ID ' + e.id + ': ' + e.asunto).join('\n');
-      const systemPrompt = 'Eres asistente juridico-administrativo. Devuelve SOLO JSON sin backticks.\nOrganismos: ' + orgList + '\nExpedientes: ' + (expList||'(ninguno)') + '\nSi el documento no encaja en ningun expediente existente, pon expedientesAfectados:[-1] y da nuevoExpedienteNombre con el nombre del expediente a crear.\nFormato: {"tipo":"string","nombre":"string","fecha":"YYYY-MM-DD o null","resumen":"string","etiquetas":[],"organismoId":"string","esperaRespuesta":true,"expedientesAfectados":[],"nuevoExpedienteNombre":"string o null","siguientePaso":"string","urgencia":"alta"}';
+      const systemPrompt = 'Eres asistente juridico-administrativo municipal espanol. Devuelve SOLO JSON sin backticks.\nOrganismos: ' + orgList + '\nExpedientes: ' + (expList||'(ninguno)') + '\nSi no encaja en ningun expediente, pon expedientesAfectados:[-1] y nuevoExpedienteNombre con el tema del caso.\nFormato: {"tipo":"Reclamacion","nombre":"string","fecha":"YYYY-MM-DD o null","resumen":"string","etiquetas":[],"organismoId":"string","esperaRespuesta":true,"expedientesAfectados":[],"nuevoExpedienteNombre":"string o null","siguientePaso":"string","urgencia":"alta"}';
       let userContent;
-      if(isImage) userContent=[{type:'image',source:{type:'base64',media_type:file.type,data:b64}},{type:'text',text:'Analiza.'}];
-      else if(isPDF) userContent=[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Analiza.'}];
-      else { const text=await file.text(); userContent='Analiza:\n\n'+text.slice(0,3000); }
+      if(isImage) {
+        const b64 = await toBase64(file);
+        userContent=[{type:'image',source:{type:'base64',media_type:file.type,data:b64}},{type:'text',text:'Analiza este documento administrativo municipal.'}];
+      } else if(isPDF) {
+        const pdfText = await extractPDFText(file);
+        if(pdfText && pdfText.length > 50) {
+          userContent = 'Analiza este documento administrativo municipal:\n\n' + pdfText;
+        } else {
+          const b64 = await toBase64(file);
+          userContent=[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Analiza este documento administrativo municipal.'}];
+        }
+      } else {
+        const text = await file.text();
+        userContent = 'Analiza:\n\n' + text.slice(0,3000);
+      }
       const res = await fetch('https://anthropic-proxy.mundobar66.workers.dev',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:500,system:systemPrompt,messages:[{role:'user',content:userContent}]})});
       const data = await res.json();
       if(data.error) throw new Error(data.error.message||'API error');
@@ -1316,6 +1329,95 @@ dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));
 dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');handleFiles(e.dataTransfer.files);});
 
 function toBase64(file){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=()=>rej(new Error('Error'));r.readAsDataURL(file);});}
+
+async function extractPDFText(file) {
+  try {
+    if (typeof pdfjsLib === 'undefined') return null;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    const ab = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data: ab}).promise;
+    let text = '';
+    const maxPages = Math.min(pdf.numPages, 4);
+    for (let i = 1; i <= maxPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      text += content.items.map(s => s.str).join(' ') + '\n';
+    }
+    return text.trim().slice(0, 4000);
+  } catch(e) {
+    console.error('PDF extract error:', e);
+    return null;
+  }
+}
+
+// ── RE-ANALYZE EXISTING DOCS ──
+async function reanalyzeDocs() {
+  const docs = state.documentos.filter(d => !d.tipo || d.tipo === 'Otro');
+  if (!docs.length) { showToast('No hay documentos sin analizar'); return; }
+  
+  if (!confirm('Re-analizar ' + docs.length + ' documentos sin clasificar usando solo el nombre del archivo. ¿Continuar?')) return;
+  
+  let created = 0;
+  for (const doc of docs) {
+    const orgList = ORGANISMOS.map(o => '- ' + o.id + ': ' + o.name).join('\n');
+    const expList = state.expedientes.map(e => '- ID ' + e.id + ': ' + e.asunto).join('\n');
+    const systemPrompt = 'Eres asistente juridico-administrativo municipal espanol. Basandote en el nombre del archivo, devuelve SOLO JSON sin backticks.\nOrganismos: ' + orgList + '\nExpedientes: ' + (expList||'(ninguno)') + '\nSi no encaja en ningun expediente, pon expedientesAfectados:[-1] y nuevoExpedienteNombre con el tema del caso deducido del nombre.\nFormato: {"tipo":"Reclamacion","nombre":"string","fecha":"YYYY-MM-DD o null","resumen":"string","etiquetas":[],"organismoId":"string","esperaRespuesta":true,"expedientesAfectados":[],"nuevoExpedienteNombre":"string o null","siguientePaso":"string","urgencia":"media"}';
+    
+    try {
+      showToast('Analizando ' + (++created) + '/' + docs.length + ': ' + doc.nombre.slice(0,30) + '...');
+      const res = await fetch('https://anthropic-proxy.mundobar66.workers.dev', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({model:'claude-sonnet-4-20250514', max_tokens:500, system:systemPrompt, messages:[{role:'user',content:'Nombre del archivo: ' + doc.nombre}]})
+      });
+      const data = await res.json();
+      if(data.error) continue;
+      const tb = (data.content||[]).find(b=>b.type==='text');
+      if(!tb) continue;
+      const raw = tb.text||'{}';
+      const clean = raw.replace(/```json|```/g,'').trim();
+      const js = clean.indexOf('{'); const je = clean.lastIndexOf('}');
+      const analysis = JSON.parse(js>=0 ? clean.slice(js,je+1) : clean);
+      
+      // Update doc
+      doc.tipo = analysis.tipo || doc.tipo;
+      doc.resumen = analysis.resumen || doc.nombre;
+      doc.etiquetas = analysis.etiquetas || [];
+      doc.organismoId = analysis.organismoId || 'otro';
+      if(analysis.fecha) doc.fecha = analysis.fecha;
+      
+      // Update in DB
+      await sbFetch('/rest/v1/documentos?id=eq.'+doc.id, 'PATCH', {
+        tipo: doc.tipo, resumen: doc.resumen, etiquetas: doc.etiquetas,
+        organismo_id: doc.organismoId, fecha: doc.fecha||null
+      });
+      
+      // Create/link expediente
+      let expIds = (analysis.expedientesAfectados||[]).filter(id=>id!==-1);
+      if((analysis.expedientesAfectados||[]).includes(-1) && analysis.nuevoExpedienteNombre) {
+        const existing = state.expedientes.find(e=>e.asunto.toLowerCase()===analysis.nuevoExpedienteNombre.toLowerCase());
+        if(existing) {
+          expIds.push(existing.id);
+        } else {
+          const newExpData = {asunto:analysis.nuevoExpedienteNombre, estado:'activo', fecha:doc.fecha||today(), siguientePaso:analysis.siguientePaso||'', notas:'', createdAt:today()};
+          const newExpId = await saveExpToDB({...newExpData, _new:true});
+          newExpData.id = newExpId;
+          state.expedientes.push(newExpData);
+          expIds.push(newExpId);
+        }
+      }
+      if(expIds.length) {
+        doc.expedientes = [...new Set([...(doc.expedientes||[]), ...expIds])];
+        await sbFetch('/rest/v1/documentos?id=eq.'+doc.id, 'PATCH', {expedientes: doc.expedientes});
+      }
+      
+      await new Promise(r=>setTimeout(r,500));
+    } catch(e) { console.error('Error re-analizando:', doc.nombre, e); }
+  }
+  
+  renderNav();
+  showDashboard();
+  showToast('Re-análisis completado — ' + state.expedientes.length + ' expedientes creados');
+}
 
 // INIT
 async function init() {
