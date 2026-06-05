@@ -1105,7 +1105,7 @@ async function processBatch() {
       if(isImage) userContent=[{type:'image',source:{type:'base64',media_type:file.type,data:b64}},{type:'text',text:'Analiza.'}];
       else if(isPDF) userContent=[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Analiza.'}];
       else { const text=await file.text(); userContent='Analiza:\n\n'+text.slice(0,3000); }
-      const res = await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:500,system:systemPrompt,messages:[{role:'user',content:userContent}]})});
+      const res = await fetch('https://anthropic-proxy.mundobar66.workers.dev',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:500,system:systemPrompt,messages:[{role:'user',content:userContent}]})});
       const data = await res.json();
       const raw = data.content?.find(b=>b.type==='text')?.text||'{}';
       const analysis = JSON.parse(raw.replace(/```json|```/g,'').trim());
@@ -1183,7 +1183,7 @@ async function handleFile(file) {
     if(isImage) userContent=[{type:'image',source:{type:'base64',media_type:file.type,data:b64}},{type:'text',text:'Analiza este documento administrativo.'}];
     else if(isPDF) userContent=[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Analiza este documento administrativo.'}];
     else { const text=await file.text(); userContent='Analiza:\n\n'+text.slice(0,5000); }
-    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,system:systemPrompt,messages:[{role:'user',content:userContent}]})});
+    const res=await fetch('https://anthropic-proxy.mundobar66.workers.dev',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,system:systemPrompt,messages:[{role:'user',content:userContent}]})});
     const data=await res.json();
     const raw=data.content?.find(b=>b.type==='text')?.text||'{}';
     const analysis=JSON.parse(raw.replace(/```json|```/g,'').trim());
