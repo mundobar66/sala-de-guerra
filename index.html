@@ -765,6 +765,7 @@ function showDashboard() {
         <p>${state.documentos.length > 0 ? state.documentos.length + ' documentos guardados. Sube más para que la IA cree los expedientes automáticamente.' : 'Sube documentos y la IA creará los expedientes automáticamente.'}</p>
         <button class="btn-primary" style="width:auto;display:inline-block;padding:10px 24px;" onclick="openUpload()">↑ Subir documentos</button>
         <button class="btn-ghost" style="width:auto;display:inline-block;padding:10px 24px;margin-top:8px;" onclick="reanalyzeDocs()">🔄 Re-analizar y crear expedientes</button>
+        <button class="btn-ghost" style="width:auto;display:inline-block;padding:10px 24px;margin-top:8px;" onclick="testDB()">🔧 Test conexión BD</button>
       </div>` : '')}
     </div>`;
 }
@@ -1417,6 +1418,25 @@ async function reanalyzeDocs() {
   renderNav();
   showDashboard();
   showToast('Re-análisis completado — ' + state.expedientes.length + ' expedientes creados');
+}
+
+async function testDB() {
+  try {
+    showToast('Probando conexión...');
+    const res = await sbFetch('/rest/v1/expedientes', 'POST', {
+      asunto: 'TEST-BORRAR', estado: 'activo', fecha: null, siguiente_paso: null, notas: null
+    });
+    const arr = Array.isArray(res) ? res : [res];
+    const newId = arr[0]?.id;
+    if (newId) {
+      await sbFetch('/rest/v1/expedientes?id=eq.' + newId, 'DELETE');
+      alert('✅ CONEXIÓN OK - Se creó y borró el expediente de prueba con ID: ' + newId + '\n\nLa base de datos funciona correctamente.');
+    } else {
+      alert('⚠️ Respuesta inesperada: ' + JSON.stringify(res));
+    }
+  } catch(e) {
+    alert('❌ ERROR: ' + e.message + '\n\nRevisa la consola para más detalles.');
+  }
 }
 
 // INIT
