@@ -537,16 +537,11 @@ async function loadState() {
 }
 
 // ── SAVE FUNCTIONS ──
-let _firstExpSave = true;
 async function saveExpToDB(exp) {
   const body = { asunto: exp.asunto, estado: exp.estado||'activo', fecha: exp.fecha||null, siguiente_paso: exp.siguientePaso||null, notas: exp.notas||null };
   if (exp._new || !exp.id) {
     // INSERT new expediente
     const res = await sbFetch('/rest/v1/expedientes', 'POST', body);
-    if (_firstExpSave) {
-      _firstExpSave = false;
-      alert('DEBUG saveExpToDB POST result: ' + JSON.stringify(res));
-    }
     const arr = Array.isArray(res) ? res : [res];
     return arr[0]?.id;
   } else {
@@ -1358,19 +1353,20 @@ async function extractPDFText(file) {
 
 // ── RE-ANALYZE EXISTING DOCS ──
 async function reanalyzeDocs() {
-  const docs = state.documentos.filter(d => !d.tipo || d.tipo === 'Otro');
-  if (!docs.length) { showToast('No hay documentos sin analizar'); return; }
+  const docs = state.documentos; // Todos los documentos, sin filtro
+  if (!docs.length) { showToast('No hay documentos cargados'); return; }
   
-  if (!confirm('Re-analizar ' + docs.length + ' documentos sin clasificar usando solo el nombre del archivo. ¿Continuar?')) return;
+  if (!confirm('Re-analizar ' + docs.length + ' documentos y crear expedientes automáticamente. ¿Continuar?')) return;
   
-  let created = 0;
+  let createdCount = 0;
+  let processed = 0;
   for (const doc of docs) {
     const orgList = ORGANISMOS.map(o => '- ' + o.id + ': ' + o.name).join('\n');
     const expList = state.expedientes.map(e => '- ID ' + e.id + ': ' + e.asunto).join('\n');
     const systemPrompt = 'Eres asistente juridico-administrativo municipal espanol. Basandote en el nombre del archivo, devuelve SOLO JSON sin backticks.\nOrganismos: ' + orgList + '\nExpedientes: ' + (expList||'(ninguno)') + '\nSi no encaja en ningun expediente, pon expedientesAfectados:[-1] y nuevoExpedienteNombre con el tema del caso deducido del nombre.\nFormato: {"tipo":"Reclamacion","nombre":"string","fecha":"YYYY-MM-DD o null","resumen":"string","etiquetas":[],"organismoId":"string","esperaRespuesta":true,"expedientesAfectados":[],"nuevoExpedienteNombre":"string o null","siguientePaso":"string","urgencia":"media"}';
     
     try {
-      showToast('Analizando ' + (++created) + '/' + docs.length + ': ' + doc.nombre.slice(0,30) + '...');
+      showToast('Analizando ' + (++processed) + '/' + docs.length + ': ' + doc.nombre.slice(0,30) + '...');
       const res = await fetch('https://anthropic-proxy.mundobar66.workers.dev', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({model:'claude-sonnet-4-20250514', max_tokens:500, system:systemPrompt, messages:[{role:'user',content:'Nombre del archivo: ' + doc.nombre}]})
@@ -1416,6 +1412,7 @@ async function reanalyzeDocs() {
             newExpData.id = newExpId;
             state.expedientes.push(newExpData);
             expIds.push(newExpId);
+            createdCount++;
           }
         } catch(createErr) { console.error('Error creando exp:', createErr); }
       }
@@ -1428,9 +1425,15 @@ async function reanalyzeDocs() {
     } catch(e) { console.error('Error re-analizando:', doc.nombre, e); }
   }
   
+  // Recargar expedientes desde Supabase para tener los datos actualizados
+  try {
+    const expsFromDB = await sbFetch('/rest/v1/expedientes?order=id.asc');
+    state.expedientes = (expsFromDB||[]).map(e=>({id:e.id,asunto:e.asunto,estado:e.estado||'activo',fecha:e.fecha,siguientePaso:e.siguiente_paso||'',notas:e.notas||''}));
+  } catch(reloadErr) { console.error('Error recargando expedientes:', reloadErr); }
+  
   renderNav();
   showDashboard();
-  showToast('Re-análisis completado — ' + state.expedientes.length + ' expedientes creados');
+  showToast('✅ Re-análisis completado — ' + createdCount + ' expedientes nuevos creados');
 }
 
 async function testDB() {
