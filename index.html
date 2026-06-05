@@ -1353,104 +1353,56 @@ async function extractPDFText(file) {
 
 // ── RE-ANALYZE EXISTING DOCS ──
 async function reanalyzeDocs() {
-  const docs = state.documentos; // Todos los documentos, sin filtro
+  const docs = state.documentos;
   if (!docs.length) { showToast('No hay documentos cargados'); return; }
-  
-  if (!confirm('Re-analizar ' + docs.length + ' documentos y crear expedientes automáticamente. ¿Continuar?')) return;
-  
+  if (!confirm('Crear expedientes a partir de los ' + docs.length + ' documentos. ¿Continuar?')) return;
+
   let createdCount = 0;
-  let processed = 0;
-  let errors = 0;
-  // Panel de log visible
-  const logDiv = document.createElement('div');
-  logDiv.id = 'reanalysis-log';
-  logDiv.style = 'position:fixed;bottom:60px;right:20px;background:#1a1410;color:#c9a96e;font-family:monospace;font-size:11px;padding:12px;border-radius:6px;max-width:420px;max-height:200px;overflow-y:auto;z-index:9999;';
-  logDiv.innerHTML = '📋 Log de re-análisis<br>';
-  document.body.appendChild(logDiv);
-  function addLog(msg) { logDiv.innerHTML += msg + '<br>'; logDiv.scrollTop = logDiv.scrollHeight; }
+  showToast('Creando expedientes...');
 
   for (const doc of docs) {
-    const orgList = ORGANISMOS.map(o => '- ' + o.id + ': ' + o.name).join('\n');
-    const expList = state.expedientes.map(e => '- ID ' + e.id + ': ' + e.asunto).join('\n');
-    const systemPrompt = 'Eres asistente juridico-administrativo municipal espanol. Basandote en el nombre del archivo, devuelve SOLO JSON sin backticks.\nOrganismos: ' + orgList + '\nExpedientes: ' + (expList||'(ninguno)') + '\nSi no encaja en ningun expediente, pon expedientesAfectados:[-1] y nuevoExpedienteNombre con el tema del caso deducido del nombre.\nFormato: {"tipo":"Reclamacion","nombre":"string","fecha":"YYYY-MM-DD o null","resumen":"string","etiquetas":[],"organismoId":"string","esperaRespuesta":true,"expedientesAfectados":[],"nuevoExpedienteNombre":"string o null","siguientePaso":"string","urgencia":"media"}';
-    
     try {
-      showToast('Analizando ' + (++processed) + '/' + docs.length + ': ' + doc.nombre.slice(0,30) + '...');
-      const res = await fetch('https://anthropic-proxy.mundobar66.workers.dev', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({model:'claude-sonnet-4-20250514', max_tokens:500, system:systemPrompt, messages:[{role:'user',content:'Nombre del archivo: ' + doc.nombre}]})
-      });
-      const data = await res.json();
-      if(data.error) { addLog('❌ IA error doc '+processed+': '+JSON.stringify(data.error).slice(0,60)); errors++; continue; }
-      const tb = (data.content||[]).find(b=>b.type==='text');
-      if(!tb) { addLog('❌ Sin respuesta texto doc '+processed); errors++; continue; }
-      const raw = tb.text||'{}';
-      const clean = raw.replace(/```json|```/g,'').trim();
-      const js = clean.indexOf('{'); const je = clean.lastIndexOf('}');
-      const analysis = JSON.parse(js>=0 ? clean.slice(js,je+1) : clean);
-      
-      // Update doc
-      doc.tipo = analysis.tipo || doc.tipo;
-      doc.resumen = analysis.resumen || doc.nombre;
-      doc.etiquetas = analysis.etiquetas || [];
-      doc.organismoId = analysis.organismoId || 'otro';
-      if(analysis.fecha) doc.fecha = analysis.fecha;
-      
-      // Update in DB
-      await sbFetch('/rest/v1/documentos?id=eq.'+doc.id, 'PATCH', {
-        tipo: doc.tipo, resumen: doc.resumen, etiquetas: doc.etiquetas,
-        organismo_id: doc.organismoId, fecha: doc.fecha||null
-      });
-      
-      // Create/link expediente - always create one if none found
-      let expIds = (analysis.expedientesAfectados||[]).filter(id=>id!==-1 && id>0);
-      
-      // Determine expediente name
-      const expName = analysis.nuevoExpedienteNombre || analysis.nombre || doc.nombre.replace(/\.[^.]+$/, '').replace(/_/g,' ');
-      
-      // Check if expediente already exists
-      const existingExp = state.expedientes.find(e => e.asunto.toLowerCase() === expName.toLowerCase());
-      if (existingExp) {
-        if (!expIds.includes(existingExp.id)) expIds.push(existingExp.id);
-        addLog('🔗 Vinculado a exp existente: '+expName.slice(0,40));
-      } else if (expIds.length === 0) {
-        // Create new expediente
-        try {
-          addLog('➕ Creando exp: '+expName.slice(0,40));
-          const newExpData = {asunto: expName, estado:'activo', fecha: doc.fecha||today(), siguientePaso: analysis.siguientePaso||'', notas:'', createdAt: today()};
-          const newExpId = await saveExpToDB({...newExpData, _new:true});
-          addLog(newExpId ? '✅ Creado ID='+newExpId : '❌ saveExpToDB devolvió: '+JSON.stringify(newExpId));
-          if (newExpId) {
-            newExpData.id = newExpId;
-            state.expedientes.push(newExpData);
-            expIds.push(newExpId);
-            createdCount++;
-          }
-        } catch(createErr) { addLog('💥 Error creando exp: '+createErr.message); console.error('Error creando exp:', createErr); }
-      } else {
-        addLog('⚠️ expIds ya tiene IDs válidos (no crea nuevo): '+JSON.stringify(expIds));
+      // Extraer nombre del expediente del nombre del archivo
+      const expName = doc.nombre
+        .replace(/\.[^.]+$/, '')       // quitar extensión
+        .replace(/^\d{8}_/, '')        // quitar fecha inicial tipo 20260603_
+        .replace(/_/g, ' ')            // guiones bajos → espacios
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 80);
+
+      if (!expName) continue;
+
+      // Buscar si ya existe un expediente con este nombre
+      let exp = state.expedientes.find(e => e.asunto.toLowerCase() === expName.toLowerCase());
+
+      if (!exp) {
+        // Crear expediente nuevo en Supabase
+        const res = await sbFetch('/rest/v1/expedientes', 'POST', {
+          asunto: expName, estado: 'activo', fecha: doc.fecha || null,
+          siguiente_paso: '', notas: ''
+        });
+        const arr = Array.isArray(res) ? res : [res];
+        const newId = arr[0]?.id;
+        if (newId) {
+          exp = { id: newId, asunto: expName, estado: 'activo', fecha: doc.fecha, siguientePaso: '', notas: '' };
+          state.expedientes.push(exp);
+          createdCount++;
+        }
       }
-      if(expIds.length) {
-        doc.expedientes = [...new Set([...(doc.expedientes||[]), ...expIds])];
-        await sbFetch('/rest/v1/documentos?id=eq.'+doc.id, 'PATCH', {expedientes: doc.expedientes});
+
+      // Vincular documento al expediente
+      if (exp) {
+        const expIds = [...new Set([...(doc.expedientes || []), exp.id])];
+        await sbFetch('/rest/v1/documentos?id=eq.' + doc.id, 'PATCH', { expedientes: expIds });
+        doc.expedientes = expIds;
       }
-      
-      await new Promise(r=>setTimeout(r,500));
-    } catch(e) { console.error('Error re-analizando:', doc.nombre, e); }
+    } catch(e) { console.error(doc.nombre, e); }
   }
-  
-  // Recargar expedientes desde Supabase para tener los datos actualizados
-  try {
-    const expsFromDB = await sbFetch('/rest/v1/expedientes?order=id.asc');
-    state.expedientes = (expsFromDB||[]).map(e=>({id:e.id,asunto:e.asunto,estado:e.estado||'activo',fecha:e.fecha,siguientePaso:e.siguiente_paso||'',notas:e.notas||''}));
-  } catch(reloadErr) { console.error('Error recargando expedientes:', reloadErr); }
-  
+
   renderNav();
   showDashboard();
-  addLog('--- FIN: '+createdCount+' creados, '+errors+' errores IA ---');
-  showToast('✅ Re-análisis completado — ' + createdCount + ' expedientes nuevos creados');
-  // El log queda visible 30 segundos
-  setTimeout(() => { const l = document.getElementById('reanalysis-log'); if(l) l.remove(); }, 30000);
+  showToast('✅ ' + createdCount + ' expedientes creados');
 }
 
 async function testDB() {
