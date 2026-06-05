@@ -1124,7 +1124,7 @@ async function processBatch() {
         const text = await file.text();
         userContent = 'Analiza:\n\n' + text.slice(0,3000);
       }
-      const res = await fetch('https://anthropic-proxy.mundobar66.workers.dev',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:500,system:systemPrompt,messages:[{role:'user',content:userContent}]})});
+      const res = await fetch('https://anthropic-proxy.mundobar66.workers.dev',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:500,system:systemPrompt,messages:[{role:'user',content:userContent}]})});
       const data = await res.json();
       if(data.error) throw new Error(data.error.message||'API error');
       const textBlock2 = (data.content||[]).find(b=>b.type==='text');
@@ -1209,7 +1209,7 @@ async function handleFile(file) {
     if(isImage) userContent=[{type:'image',source:{type:'base64',media_type:file.type,data:b64}},{type:'text',text:'Analiza este documento administrativo.'}];
     else if(isPDF) userContent=[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Analiza este documento administrativo.'}];
     else { const text=await file.text(); userContent='Analiza:\n\n'+text.slice(0,5000); }
-    const res=await fetch('https://anthropic-proxy.mundobar66.workers.dev',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,system:systemPrompt,messages:[{role:'user',content:userContent}]})});
+    const res=await fetch('https://anthropic-proxy.mundobar66.workers.dev',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:1000,system:systemPrompt,messages:[{role:'user',content:userContent}]})});
     const data=await res.json();
     if(data.error) throw new Error(data.error.message||'API error');
     const tb = (data.content||[]).find(b=>b.type==='text');
@@ -1355,34 +1355,56 @@ async function extractPDFText(file) {
 async function reanalyzeDocs() {
   const docs = state.documentos;
   if (!docs.length) { showToast('No hay documentos cargados'); return; }
-  if (!confirm('Crear expedientes a partir de los ' + docs.length + ' documentos. ¿Continuar?')) return;
+  if (!confirm('La IA analizará ' + docs.length + ' documentos y los agrupará en expedientes por tema. ¿Continuar?')) return;
 
   let createdCount = 0;
-  showToast('Creando expedientes...');
+  let processed = 0;
 
   for (const doc of docs) {
-    try {
-      // Extraer nombre del expediente del nombre del archivo
-      const expName = doc.nombre
-        .replace(/\.[^.]+$/, '')       // quitar extensión
-        .replace(/^\d{8}_/, '')        // quitar fecha inicial tipo 20260603_
-        .replace(/_/g, ' ')            // guiones bajos → espacios
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 80);
+    processed++;
+    showToast('Analizando ' + processed + '/' + docs.length + ': ' + doc.nombre.slice(0, 35) + '...');
 
+    try {
+      // Lista de expedientes ya creados para que la IA pueda reutilizarlos
+      const expsExistentes = state.expedientes.map(e => e.asunto).join('\n');
+
+      const prompt = `Eres un asistente juridico-administrativo. Dado el nombre de un documento PDF de una auditoria ciudadana contra el Ayuntamiento de Guadarrama, debes:
+1. Identificar a qué expediente/tema pertenece este documento
+2. Si ya existe un expediente adecuado en la lista, reutilizarlo (devuelve exactamente el mismo nombre)
+3. Si no existe, proponer un nombre corto y claro para el expediente (máximo 6 palabras)
+
+Expedientes existentes:
+${expsExistentes || '(ninguno todavía)'}
+
+Nombre del archivo: ${doc.nombre}
+
+Responde SOLO con el nombre del expediente, sin explicaciones, sin comillas, sin puntos.`;
+
+      const res = await fetch('https://anthropic-proxy.mundobar66.workers.dev', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 50,
+          messages: [{ role: 'user', content: prompt }]
+        })
+      });
+
+      const data = await res.json();
+      if (data.error) { console.error('IA error:', data.error); continue; }
+
+      const expName = (data.content?.[0]?.text || '').trim().slice(0, 80);
       if (!expName) continue;
 
-      // Buscar si ya existe un expediente con este nombre
+      // Buscar si ya existe ese expediente
       let exp = state.expedientes.find(e => e.asunto.toLowerCase() === expName.toLowerCase());
 
       if (!exp) {
-        // Crear expediente nuevo en Supabase
-        const res = await sbFetch('/rest/v1/expedientes', 'POST', {
+        const res2 = await sbFetch('/rest/v1/expedientes', 'POST', {
           asunto: expName, estado: 'activo', fecha: doc.fecha || null,
           siguiente_paso: '', notas: ''
         });
-        const arr = Array.isArray(res) ? res : [res];
+        const arr = Array.isArray(res2) ? res2 : [res2];
         const newId = arr[0]?.id;
         if (newId) {
           exp = { id: newId, asunto: expName, estado: 'activo', fecha: doc.fecha, siguientePaso: '', notas: '' };
@@ -1391,18 +1413,20 @@ async function reanalyzeDocs() {
         }
       }
 
-      // Vincular documento al expediente
       if (exp) {
         const expIds = [...new Set([...(doc.expedientes || []), exp.id])];
         await sbFetch('/rest/v1/documentos?id=eq.' + doc.id, 'PATCH', { expedientes: expIds });
         doc.expedientes = expIds;
       }
+
+      await new Promise(r => setTimeout(r, 300)); // pausa para no saturar la API
+
     } catch(e) { console.error(doc.nombre, e); }
   }
 
   renderNav();
   showDashboard();
-  showToast('✅ ' + createdCount + ' expedientes creados');
+  showToast('✅ Análisis completado — ' + createdCount + ' expedientes nuevos, ' + state.expedientes.length + ' en total');
 }
 
 async function testDB() {
