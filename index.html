@@ -1392,19 +1392,27 @@ async function reanalyzeDocs() {
         organismo_id: doc.organismoId, fecha: doc.fecha||null
       });
       
-      // Create/link expediente
-      let expIds = (analysis.expedientesAfectados||[]).filter(id=>id!==-1);
-      if((analysis.expedientesAfectados||[]).includes(-1) && analysis.nuevoExpedienteNombre) {
-        const existing = state.expedientes.find(e=>e.asunto.toLowerCase()===analysis.nuevoExpedienteNombre.toLowerCase());
-        if(existing) {
-          expIds.push(existing.id);
-        } else {
-          const newExpData = {asunto:analysis.nuevoExpedienteNombre, estado:'activo', fecha:doc.fecha||today(), siguientePaso:analysis.siguientePaso||'', notas:'', createdAt:today()};
+      // Create/link expediente - always create one if none found
+      let expIds = (analysis.expedientesAfectados||[]).filter(id=>id!==-1 && id>0);
+      
+      // Determine expediente name
+      const expName = analysis.nuevoExpedienteNombre || analysis.nombre || doc.nombre.replace(/\.[^.]+$/, '').replace(/_/g,' ');
+      
+      // Check if expediente already exists
+      const existingExp = state.expedientes.find(e => e.asunto.toLowerCase() === expName.toLowerCase());
+      if (existingExp) {
+        if (!expIds.includes(existingExp.id)) expIds.push(existingExp.id);
+      } else if (expIds.length === 0) {
+        // Create new expediente
+        try {
+          const newExpData = {asunto: expName, estado:'activo', fecha: doc.fecha||today(), siguientePaso: analysis.siguientePaso||'', notas:'', createdAt: today()};
           const newExpId = await saveExpToDB({...newExpData, _new:true});
-          newExpData.id = newExpId;
-          state.expedientes.push(newExpData);
-          expIds.push(newExpId);
-        }
+          if (newExpId) {
+            newExpData.id = newExpId;
+            state.expedientes.push(newExpData);
+            expIds.push(newExpId);
+          }
+        } catch(createErr) { console.error('Error creando exp:', createErr); }
       }
       if(expIds.length) {
         doc.expedientes = [...new Set([...(doc.expedientes||[]), ...expIds])];
